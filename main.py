@@ -2,6 +2,7 @@ import logging
 import os
 import requests
 import telebot
+from aiogram.client import telegram
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 import re
@@ -40,14 +41,15 @@ def setup_bot(telegram_bot_token, website_url):
         logging.info("Received a message")
 
         html_content = fetch_data(website_url)
-        tbody_content = extract_tbody_content(html_content)
-        lectures_content = extract_lecture_times(tbody_content)
+        tbody_content = extract_tr_tags_content(html_content)
+        current_week = 9  # TODO: change later to auto search current week
+        lectures_content = extract_lecture_times(tbody_content, current_week)
 
         # Split the response into parts if it's too long
         max_message_length = 4096
         for i in range(0, len(lectures_content), max_message_length):
             part = lectures_content[i:i + max_message_length]
-            bot.reply_to(message, part)
+            bot.reply_to(message, part, parse_mode='Markdown')
 
         logging.info("Finished answering a message")
 
@@ -79,7 +81,7 @@ def fetch_data(website_url):
     return response.text
 
 
-def extract_tbody_content(html):
+def extract_tr_tags_content(html):
     soup = BeautifulSoup(html, 'html.parser')
     rows = soup.find_all('tr')
     if rows:
@@ -88,24 +90,57 @@ def extract_tbody_content(html):
     return "No rows found"
 
 
-def extract_lecture_times(html):
+def extract_lecture_times(html, current_week):
     soup = BeautifulSoup(html, 'html.parser')
     rows = soup.find_all('tr')
     answer = ""
     pattern = r'([01]?\d|2[0-3]):[0-5]\d-([01]?\d|2[0-3]):[0-5]\d'
 
+    weekday = ""
+    td_tags = []
     for row in rows:
-        row_soup = BeautifulSoup(str(row), 'html.parser')
-        td_tags = row_soup.find_all('td')
+        if row.find('td', class_='wday'):
+            weekday = row.find('td', class_='wday').text.strip()
+        else:
+            row_soup = BeautifulSoup(str(row), 'html.parser')
+            td_tags = row_soup.find_all('td')
 
-        for td_tag in td_tags:
-            var = td_tag.text
-            match = re.search(pattern, var)
-            if match:
-                answer += " ".join(td.text for td in td_tags) + " \n"
-        answer += "\n\n"
+        if len(td_tags) > 1:
+            if weekday:
+                answer += f"\n\n{weekday}\n\n"
+                weekday = ""
+
+            week_info = td_tags[1].text.strip()
+            if is_current_week(week_info, current_week):
+                for td_tag in td_tags:
+                    match = re.search(pattern, td_tag.text)
+                    if match:
+                        for i, td in enumerate(td_tags):
+                            if i != 1:
+                                if re.match(pattern, td.text):
+                                    answer += f"*{td.text}*\n"
+                                elif re.search(r'\d+', td.text):
+                                    answer += f"*{td.text}*\n"
+                                else:
+                                    answer += f"{td.text.replace(' ,  ',',\n')}\n"
+                answer += "\n"
 
     return answer
+
+
+def is_current_week(week_info, current_week):
+    week_info = week_info.replace('(', '').replace(')', '').replace(' ', '')
+    week_numbers = re.findall(r'\d+-\d+|\d+', week_info)
+
+    for num in week_numbers:
+        if '-' in num:
+            start, end = map(int, num.split('-'))
+            if start <= current_week <= end:
+                return True
+        elif int(num) == current_week:
+            return True
+    return False
+
 
 
 def main():
