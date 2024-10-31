@@ -7,6 +7,10 @@ from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 import re
 
+foreing_language = "Deutsh"
+#foreing_language = "English"
+foreign_language_pattern = "подгр.сб.нем.яз."
+
 
 def load_api_credentials():
     load_dotenv()
@@ -90,7 +94,9 @@ def extract_tr_tags_content(html):
     return "No rows found"
 
 
-def extract_lecture_times(html, current_week):
+def extract_lecture_times(html, current_week): #TODO rewrite this peace of shit ASAP ASAP ASAP ASAP
+    var2 = True
+    var3 = True
     soup = BeautifulSoup(html, 'html.parser')
     rows = soup.find_all('tr')
     answer = ""
@@ -108,11 +114,25 @@ def extract_lecture_times(html, current_week):
         if len(td_tags) > 1:
             if weekday:
                 answer += f"\n\n{weekday}\n\n"
+                if weekday == "вторник":
+                    answer = answer[:-10]
+                    answer += "14: 35 - 15:55\nИностранный язык(Практические занятия)\nподгр.сб.нем.яз.\nБосак Алёна Анатольевна\n4 / 901\n\nвторник\n\n"
                 weekday = ""
 
+            if row.find_all('td')[0].text == "подгр.ДКН-1" and var2:
+                answer = answer[:-54]
+                var2  = False
+
+            if row.find_all('td')[0].text == "подгр.сб.нем.яз.":
+                answer = answer[:-1]
+                for td in td_tags:
+                    answer += f"*{td.text}*\n"
             week_info = td_tags[1].text.strip()
             if is_current_week(week_info, current_week):
-                for td_tag in td_tags:
+
+                for td_tag in row.find_all('td'):
+                    if re.match(foreign_language_pattern, td_tag.text):
+                        answer += "f{td.text}\n"
                     match = re.search(pattern, td_tag.text)
                     if match:
                         for i, td in enumerate(td_tags):
