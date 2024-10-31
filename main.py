@@ -4,6 +4,8 @@ import requests
 import telebot
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
+import re
+
 
 def load_api_credentials():
     load_dotenv()
@@ -20,6 +22,7 @@ def load_api_credentials():
 
     return telegram_bot_token, website_url
 
+
 def create_telegram_bot(telegram_bot_token):
     try:
         bot = telebot.TeleBot(telegram_bot_token)
@@ -28,21 +31,31 @@ def create_telegram_bot(telegram_bot_token):
         logging.error(f"Error creating Telegram bot instance: {e}")
         raise SystemExit(1)
 
+
 def setup_bot(telegram_bot_token, website_url):
     bot = create_telegram_bot(telegram_bot_token)
 
     @bot.message_handler(func=lambda message: True)
     def echo(message):
-        print(1)
+        logging.info("Received a message")
+
         html_content = fetch_data(website_url)
         tbody_content = extract_tbody_content(html_content)
-        print(tbody_content)
-        bot.reply_to(message, "1")
+        lectures_content = extract_lecture_times(tbody_content)
+
+        # Split the response into parts if it's too long
+        max_message_length = 4096
+        for i in range(0, len(lectures_content), max_message_length):
+            part = lectures_content[i:i + max_message_length]
+            bot.reply_to(message, part)
+
+        logging.info("Finished answering a message")
 
     return bot
 
+
 def fetch_data(website_url):
-    current_week = 9  # TODO change later to auto search current week
+    current_week = 9  # TODO: change later to auto search current week
 
     headers = {
         'Content-Type': 'application/x-www-form-urlencoded'
@@ -60,31 +73,52 @@ def fetch_data(website_url):
 
     response = requests.post(website_url, headers=headers, data=data)
     response.encoding = 'windows-1251'
+
+    logging.info("Fetched html page")
+
     return response.text
+
 
 def extract_tbody_content(html):
     soup = BeautifulSoup(html, 'html.parser')
+    rows = soup.find_all('tr')
+    if rows:
+        answer = ''.join(str(row) for row in rows)
+        return answer[372:99999999999]  # temporal solution
+    return "No rows found"
 
-    # Try to find the tbody
-    tbody = soup.find('tbody')
 
-    if tbody:
-        return tbody.decode()  # Return the HTML content of the tbody
-    else:
-        # If no tbody is found, return all tr elements
-        rows = soup.find_all('tr')
-        if rows:
-            return ''.join(str(row) for row in rows)  # Join all <tr> elements as a string
-        return "No rows found"
+def extract_lecture_times(html):
+    soup = BeautifulSoup(html, 'html.parser')
+    rows = soup.find_all('tr')
+    answer = ""
+    pattern = r'([01]?\d|2[0-3]):[0-5]\d-([01]?\d|2[0-3]):[0-5]\d'
+
+    for row in rows:
+        row_soup = BeautifulSoup(str(row), 'html.parser')
+        td_tags = row_soup.find_all('td')
+
+        for td_tag in td_tags:
+            var = td_tag.text
+            match = re.search(pattern, var)
+            if match:
+                answer += " ".join(td.text for td in td_tags) + " \n"
+        answer += "\n\n"
+
+    return answer
+
 
 def main():
+    logging.basicConfig(level=logging.INFO)
     logging.info("Starting the bot...")
 
     telegram_bot_token, website_url = load_api_credentials()
 
     bot = setup_bot(telegram_bot_token, website_url)
+    logging.info("Started the bot")
 
     bot.infinity_polling()
+
 
 if __name__ == '__main__':
     main()
