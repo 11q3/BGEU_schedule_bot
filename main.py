@@ -2,10 +2,13 @@ import logging
 import os
 import requests
 import telebot
+from telebot import types
 from aiogram.client import telegram
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 import re
+import concurrent.futures
+
 
 foreing_language = "Deutsh"
 #foreing_language = "English"
@@ -37,12 +40,20 @@ def create_telegram_bot(telegram_bot_token):
         raise SystemExit(1)
 
 
+
 def setup_bot(telegram_bot_token, website_url):
     bot = create_telegram_bot(telegram_bot_token)
 
-    @bot.message_handler(func=lambda message: True)
-    def echo(message):
-        logging.info("Received a message")
+    @bot.message_handler(commands=['start'])
+    def start(message):
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        button = types.KeyboardButton("Get Schedule")
+        markup.add(button)
+        bot.send_message(message.chat.id, "Welcome! Press the button below to get the schedule.", reply_markup=markup)
+
+    @bot.message_handler(func=lambda message: message.text == "Get Schedule")
+    def send_schedule(message):
+        logging.info("Button pressed: Get Schedule")
 
         html_content = fetch_data(website_url)
         tbody_content = extract_tr_tags_content(html_content)
@@ -53,12 +64,11 @@ def setup_bot(telegram_bot_token, website_url):
         max_message_length = 4096
         for i in range(0, len(lectures_content), max_message_length):
             part = lectures_content[i:i + max_message_length]
-            bot.reply_to(message, part, parse_mode='Markdown')
+            bot.send_message(message.chat.id, part, parse_mode='Markdown')
 
         logging.info("Finished answering a message")
 
     return bot
-
 
 def fetch_data(website_url):
     current_week = 9  # TODO: change later to auto search current week
@@ -78,7 +88,6 @@ def fetch_data(website_url):
     }
 
     response = requests.post(website_url, headers=headers, data=data)
-    response.encoding = 'windows-1251'
 
     logging.info("Fetched html page")
 
@@ -96,7 +105,6 @@ def extract_tr_tags_content(html):
 
 def extract_lecture_times(html, current_week): #TODO rewrite this peace of shit ASAP ASAP ASAP ASAP
     var2 = True
-    var3 = True
     soup = BeautifulSoup(html, 'html.parser')
     rows = soup.find_all('tr')
     answer = ""
