@@ -1,24 +1,21 @@
-import logging
 import os
-import requests
-import telebot
-from telebot import types
-from aiogram.client import telegram
-from dotenv import load_dotenv
-from bs4 import BeautifulSoup
 import re
-import concurrent.futures
+import telebot
+import logging
+import requests
+from telebot import types
+from bs4 import BeautifulSoup
+from dotenv import load_dotenv
+from collections import defaultdict
 
-
-foreing_language = "Deutsh"
-#foreing_language = "English"
-foreign_language_pattern = "подгр.сб.нем.яз."
-
+week = 9 # TODO: change later to auto search current week, temporal solution for now
 
 def load_api_credentials():
     load_dotenv()
     telegram_bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
     website_url = os.environ.get("WEBSITE_URL")
+    subgroup = os.environ.get("SUBGROUP")
+    sub_subgroup = os.environ.get("SUB_SUBGROUP")
 
     if not telegram_bot_token:
         logging.error("TELEGRAM_BOT_TOKEN is not set in environment variables")
@@ -28,7 +25,15 @@ def load_api_credentials():
         logging.error("WEBSITE_URL is not set in environment variables")
         raise SystemExit(1)
 
-    return telegram_bot_token, website_url
+    if not subgroup:
+        logging.error("SUBGROUP is not set in environment variables")
+        raise SystemExit(1)
+
+    if not sub_subgroup:
+        logging.error("SUB_SUBGROUP is not set in environment variables")
+        raise SystemExit(1)
+
+    return telegram_bot_token, website_url, subgroup, sub_subgroup
 
 
 def create_telegram_bot(telegram_bot_token):
@@ -41,7 +46,7 @@ def create_telegram_bot(telegram_bot_token):
 
 
 
-def setup_bot(telegram_bot_token, website_url):
+def setup_bot(telegram_bot_token, website_url, subgroup, sub_subgroup):
     bot = create_telegram_bot(telegram_bot_token)
 
     @bot.message_handler(commands=['start'])
@@ -55,12 +60,14 @@ def setup_bot(telegram_bot_token, website_url):
     def send_schedule(message):
         logging.info("Button pressed: Get Schedule")
 
-        html_content = fetch_data(website_url)
-        tbody_content = extract_tr_tags_content(html_content)
-        current_week = 9  # TODO: change later to auto search current week
-        lectures_content = extract_lecture_times(tbody_content, current_week)
+        html_doc = fetch_data(website_url)
+        schedule_table = parse_html(html_doc)
+        lectures_content = "No schedule found."
 
-        # Split the response into parts if it's too long
+        if schedule_table:
+            lecture_info = extract_lecture_info(schedule_table, week, subgroup, sub_subgroup)
+            lectures_content = display_lecture_info(lecture_info)
+
         max_message_length = 4096
         for i in range(0, len(lectures_content), max_message_length):
             part = lectures_content[i:i + max_message_length]
@@ -70,9 +77,114 @@ def setup_bot(telegram_bot_token, website_url):
 
     return bot
 
-def fetch_data(website_url):
-    current_week = 9  # TODO: change later to auto search current week
 
+def display_lecture_info(lecture_info):
+    output = []
+    if lecture_info:
+        for day, lectures in lecture_info.items():
+            output.append(f"{day}:")
+            for lecture in lectures:
+                output.append(f"  Time: {lecture['Time']}")
+                output.append(f"  Subject: {lecture['Subject']}")
+                output.append(f"  Teacher: {lecture['Teacher']}")
+                output.append(f"  Classroom: {lecture['Classroom']}")
+                output.append("")
+    else:
+        output.append("No lectures found for the current week.")
+    return "\n".join(output)
+
+def extract_lecture_info(schedule_table, current_week, subgroup, sub_subgroup):
+    lecture_info = defaultdict(list)
+    current_day = None
+
+    for row in schedule_table.find_all('tr'):
+        cells = row.find_all('td')
+
+        if len(cells) == 1 and 'colspan' in cells[0].attrs:
+            current_day = cells[0].text.strip()
+            continue
+
+        if len(cells) >= 3 and 'Иностранный язык' in cells[2].text:
+            lectures = process_language_rows(row, current_week, subgroup, sub_subgroup)
+            for lecture in lectures:
+                if lecture not in lecture_info[current_day]:
+                    lecture_info[current_day].append(lecture)
+        elif len(cells) == 4:
+            lecture = process_regular_rows(cells, current_week)
+            if lecture and lecture not in lecture_info[current_day]:
+                lecture_info[current_day].append(lecture)
+
+    return lecture_info
+
+def process_language_rows(row, current_week, subgroup, sub_subgroup):
+    lecture_info = []
+    time = row.find_all('td')[0].text.strip()
+    week_info = row.find_all('td')[1].text.strip()
+
+    if not get_week_match(week_info, current_week):
+        return lecture_info
+
+    subject = row.find_all('td')[2].text.strip()
+    for group_row in row.find_next_siblings('tr'):
+        group_cells = group_row.find_all('td')
+        if len(group_cells) == 3:
+            group = group_cells[0].text.strip()
+            teacher = group_cells[1].text.strip()
+            classroom = group_cells[2].text.strip()
+
+            if subgroup in group or sub_subgroup in group:
+                lecture = {
+                    'Time': time,
+                    'Subject': f"{subject} ({group})",
+                    'Teacher': teacher,
+                    'Classroom': classroom
+                }
+                if lecture not in lecture_info:
+                    lecture_info.append(lecture)
+        else:
+            break
+
+    return lecture_info
+
+def process_regular_rows(cells, current_week):
+    time = cells[0].text.strip()
+    week_info = cells[1].text.strip()
+
+    if not get_week_match(week_info, current_week):
+        return None
+
+    subject_and_teacher = cells[2].text.strip()
+    classroom = cells[3].text.strip()
+
+    if ',' in subject_and_teacher:
+        subject, teacher = subject_and_teacher.rsplit(',', 1)
+        subject = subject.strip()
+        teacher = teacher.strip()
+    else:
+        subject = subject_and_teacher
+        teacher = ''
+
+    return {
+        'Time': time,
+        'Subject': subject,
+        'Teacher': teacher,
+        'Classroom': classroom
+    }
+
+
+def get_week_match(week_info, current_week):
+    week_match = re.findall(r'\d+(?:-\d+)?', week_info)
+    for week in week_match:
+        if '-' in week:
+            start, end = map(int, week.split('-'))
+            if start <= current_week <= end:
+                return True
+        else:
+            if int(week) == current_week:
+                return True
+    return False
+
+def fetch_data(website_url): # DONE
     headers = {
         'Content-Type': 'application/x-www-form-urlencoded'
     }
@@ -83,7 +195,7 @@ def fetch_data(website_url):
         'group': '9499',
         'tname': '',
         'period': '3',
-        'week': current_week,
+        'week': week,
         '__act': '__id.25.main.inpFldsA.GetSchedule__sp.7.results__fp.4.main'
     }
 
@@ -93,6 +205,10 @@ def fetch_data(website_url):
 
     return response.text
 
+def parse_html(html_doc):
+    soup = BeautifulSoup(html_doc, 'html.parser')
+    return soup.find('table', {'id': 'sched'})
+
 
 def extract_tr_tags_content(html):
     soup = BeautifulSoup(html, 'html.parser')
@@ -101,59 +217,6 @@ def extract_tr_tags_content(html):
         answer = ''.join(str(row) for row in rows)
         return answer[372:99999999999]  # temporal solution
     return "No rows found"
-
-
-def extract_lecture_times(html, current_week): #TODO rewrite this peace of shit ASAP ASAP ASAP ASAP
-    var2 = True
-    soup = BeautifulSoup(html, 'html.parser')
-    rows = soup.find_all('tr')
-    answer = ""
-    pattern = r'([01]?\d|2[0-3]):[0-5]\d-([01]?\d|2[0-3]):[0-5]\d'
-
-    weekday = ""
-    td_tags = []
-    for row in rows:
-        if row.find('td', class_='wday'):
-            weekday = row.find('td', class_='wday').text.strip()
-        else:
-            row_soup = BeautifulSoup(str(row), 'html.parser')
-            td_tags = row_soup.find_all('td')
-
-        if len(td_tags) > 1:
-            if weekday:
-                answer += f"\n\n{weekday}\n\n"
-                if weekday == "вторник":
-                    answer = answer[:-10]
-                    answer += "14: 35 - 15:55\nИностранный язык(Практические занятия)\nподгр.сб.нем.яз.\nБосак Алёна Анатольевна\n4 / 901\n\nвторник\n\n"
-                weekday = ""
-
-            if row.find_all('td')[0].text == "подгр.ДКН-1" and var2:
-                answer = answer[:-54]
-                var2  = False
-
-            if row.find_all('td')[0].text == "подгр.сб.нем.яз.":
-                answer = answer[:-1]
-                for td in td_tags:
-                    answer += f"*{td.text}*\n"
-            week_info = td_tags[1].text.strip()
-            if is_current_week(week_info, current_week):
-
-                for td_tag in row.find_all('td'):
-                    if re.match(foreign_language_pattern, td_tag.text):
-                        answer += "f{td.text}\n"
-                    match = re.search(pattern, td_tag.text)
-                    if match:
-                        for i, td in enumerate(td_tags):
-                            if i != 1:
-                                if re.match(pattern, td.text):
-                                    answer += f"*{td.text}*\n"
-                                elif re.search(r'\d+', td.text):
-                                    answer += f"*{td.text}*\n"
-                                else:
-                                    answer += f"{td.text.replace(' ,  ',',\n')}\n"
-                answer += "\n"
-
-    return answer
 
 
 def is_current_week(week_info, current_week):
@@ -175,9 +238,9 @@ def main():
     logging.basicConfig(level=logging.INFO)
     logging.info("Starting the bot...")
 
-    telegram_bot_token, website_url = load_api_credentials()
+    telegram_bot_token, website_url, subgroup, sub_subgroup = load_api_credentials()
 
-    bot = setup_bot(telegram_bot_token, website_url)
+    bot = setup_bot(telegram_bot_token, website_url, subgroup, sub_subgroup)
     logging.info("Started the bot")
 
     bot.infinity_polling()
