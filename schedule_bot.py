@@ -10,7 +10,7 @@ from telebot import types
 from bs4 import BeautifulSoup
 import requests
 
-# Constants
+
 MAX_RETRIES = 7  # Maximum number of retries for fetching schedule
 TIMEOUT_SECONDS = 5  # Timeout duration for fetching the HTML page
 
@@ -26,10 +26,12 @@ class ScheduleBotAction(str, Enum):
     CURRENT_WEEK = "Текущая неделя"
     NEXT_WEEK = "Следующая неделя"
     PREVIOUS_WEEK = "Предыдущая неделя"
+    SPECIFIC_WEEK = "Выбрать конкретную неделю"
     BACK = "Назад"
-    WELCOME_MESSAGE = 'Добро пожаловать! Выберите кнопку, чтобы получить расписание'
+    WELCOME_MESSAGE = "Добро пожаловать! Выберите кнопку, чтобы получить расписание"
     CHOOSE_WEEK_MESSAGE = "Выберите неделю, на которую вы хотите увидеть расписание"
     CHOOSE_DAY_MESSAGE = "Выберите день, на который вы хотите увидеть расписание"
+    ENTER_WEEK_MESSAGE = "Введите номер недели, на которую вы хотите увидеть расписание"
 
 def fetch_data(website_url, week):
     logging.info("Fetching data from website")
@@ -129,7 +131,7 @@ def extract_lecture_info(schedule_table, current_week, subgroup, sub_subgroup):
     for row in schedule_table.find_all('tr'):
         cells = row.find_all('td')
 
-        if len(cells) == 1 and 'cols pan' in cells[0].attrs:
+        if len(cells) == 1 and 'colspan' in cells[0].attrs:
             current_day = cells[0].text.strip()
             continue
 
@@ -202,10 +204,18 @@ class ScheduleBot:
         self.sub_subgroup = sub_subgroup
         self.cached_schedule_table = None
         self.week = get_current_week()
+        self.cat_image_path = "cat.jpg"
 
     def setup_bot(self):
+        @self.bot.message_handler(func=lambda message: message.text.lower() == "cat")
+        def send_cat_image(message):
+            logging.info(f"User {message.from_user.username} (ID: {message.from_user.id}) requested a cat image. He found the easter egg!")
+            with open(self.cat_image_path, 'rb') as cat_image:
+                self.bot.send_photo(message.chat.id, cat_image)
+
         @self.bot.message_handler(commands=['start'])
         def start(message):
+            logging.info(f"User {message.from_user.username} (ID: {message.from_user.id}) started the bot.")
             show_main_menu(message.chat.id)
 
         def show_main_menu(chat_id: int):
@@ -213,23 +223,32 @@ class ScheduleBot:
             button_day = types.KeyboardButton(ScheduleBotAction.GET_SCHEDULE_DAY)
             button_week = types.KeyboardButton(ScheduleBotAction.GET_SCHEDULE_WEEK)
             markup.add(button_day, button_week)
+            logging.info(f"Displaying main menu to user ID: {chat_id}")
             self.bot.send_message(chat_id, ScheduleBotAction.WELCOME_MESSAGE, reply_markup=markup)
 
         @self.bot.message_handler(func=lambda message: message.text == ScheduleBotAction.GET_SCHEDULE_WEEK)
         def select_week_option(message):
+            logging.info(f"User {message.from_user.username} (ID: {message.from_user.id}) selected 'GET_SCHEDULE_WEEK'")
             markup = types.ReplyKeyboardMarkup(row_width=3, resize_keyboard=True)
             markup.add(
                 types.KeyboardButton(ScheduleBotAction.CURRENT_WEEK),
                 types.KeyboardButton(ScheduleBotAction.NEXT_WEEK),
-                types.KeyboardButton(ScheduleBotAction.PREVIOUS_WEEK)
+                types.KeyboardButton(ScheduleBotAction.PREVIOUS_WEEK),
+                types.KeyboardButton(ScheduleBotAction.SPECIFIC_WEEK)
             )
             markup.add(types.KeyboardButton(ScheduleBotAction.BACK))
             self.bot.send_message(
-                message.chat.id, ScheduleBotAction.CHOOSE_WEEK_MESSAGE,reply_markup=markup
+                message.chat.id, ScheduleBotAction.CHOOSE_WEEK_MESSAGE, reply_markup=markup
             )
+
+        @self.bot.message_handler(func=lambda message: message.text == ScheduleBotAction.SPECIFIC_WEEK)
+        def prompt_specific_week(message):
+            logging.info(f"User {message.from_user.username} (ID: {message.from_user.id}) selected 'SPECIFIC_WEEK'")
+            self.bot.send_message(message.chat.id, ScheduleBotAction.ENTER_WEEK_MESSAGE)
 
         @self.bot.message_handler(func=lambda message: message.text == ScheduleBotAction.GET_SCHEDULE_DAY)
         def select_day(message):
+            logging.info(f"User {message.from_user.username} (ID: {message.from_user.id}) selected 'GET_SCHEDULE_DAY'")
             markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
             days = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота"]
             buttons = [types.KeyboardButton(day) for day in days]
@@ -274,13 +293,13 @@ class ScheduleBot:
                 f"User {message.from_user.username} (ID: {message.from_user.id}) requested schedule for {message.text}"
             )
 
-            week = get_current_week()  # Set a default value to avoid reference before assignment
+            week = get_current_week()
             if message.text == ScheduleBotAction.CURRENT_WEEK:
                 week = get_current_week()
             elif message.text == ScheduleBotAction.NEXT_WEEK:
                 week = get_current_week() + 1
             elif message.text == ScheduleBotAction.PREVIOUS_WEEK:
-                week = max(1, get_current_week() - 1)  # Week should not be less than 1
+                week = max(1, get_current_week() - 1)
 
             lectures_content = "Расписание не найдено"
             if self.cached_schedule_table:
@@ -298,8 +317,34 @@ class ScheduleBot:
             logging.info(
                 f"Completed weekly schedule response to user {message.from_user.username} (ID: {message.from_user.id})")
 
+        @self.bot.message_handler(func=lambda message: message.text.lstrip('-').isdigit())
+        def send_schedule_for_specific_week(message):
+            week = int(message.text)
+            if week < 1:
+                logging.warning(
+                    f"User {message.from_user.username} (ID: {message.from_user.id}) entered invalid week number: {week}")
+                self.bot.send_message(message.chat.id, "Введите корректный номер недели (например, 20)")
+                return
+
+            lectures_content = "Расписание не найдено"
+            if self.cached_schedule_table:
+                lecture_info = extract_lecture_info(
+                    self.cached_schedule_table, week, self.subgroup, self.sub_subgroup
+                )
+                if lecture_info:
+                    lectures_content = display_lecture_info(lecture_info)
+
+            logging.info(
+                f"Sending schedule for week {week} to user {message.from_user.username} (ID: {message.from_user.id})")
+
+            max_message_length = 4096
+            for i in range(0, len(lectures_content), max_message_length):
+                part = lectures_content[i:i + max_message_length]
+                self.bot.send_message(message.chat.id, part, parse_mode='Markdown')
+
         @self.bot.message_handler(func=lambda message: message.text == ScheduleBotAction.BACK)
         def back_to_main_menu(message):
+            logging.info(f"User {message.from_user.username} (ID: {message.from_user.id}) selected 'BACK' option")
             show_main_menu(message.chat.id)
 
     def run(self):
@@ -311,7 +356,7 @@ class ScheduleBot:
 
         self.setup_bot()
 
-        end_time = time.time()  # Log end time
+        end_time = time.time()
         logging.info(f"Bot setup complete. Initialization time: {end_time - start_time:.2f} seconds")
 
         self.bot.infinity_polling()
