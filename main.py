@@ -2,37 +2,38 @@ import os
 import re
 import telebot
 import logging
-import requests
+from collections import defaultdict
 from telebot import types
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-from collections import defaultdict
+import requests
+import time
 
-week = 9 # TODO: change later to auto search current week, temporal solution for now
+week = 10  # TODO: change later to auto search current week, temporal solution for now
+cached_schedule_table = None  # This will store the schedule for reuse after the first fetch
+MAX_RETRIES = 3  # Maximum number of retries for fetching schedule
+TIMEOUT_SECONDS = 5  # Timeout duration for fetching the HTML page
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+
 
 def load_api_credentials():
+    logging.info("Starting to load API credentials")
     load_dotenv()
     telegram_bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
     website_url = os.environ.get("WEBSITE_URL")
     subgroup = os.environ.get("SUBGROUP")
     sub_subgroup = os.environ.get("SUB_SUBGROUP")
 
-    if not telegram_bot_token:
-        logging.error("TELEGRAM_BOT_TOKEN is not set in environment variables")
+    if not telegram_bot_token or not website_url or not subgroup or not sub_subgroup:
+        logging.error("Some environment variables are not set.")
         raise SystemExit(1)
 
-    if not website_url:
-        logging.error("WEBSITE_URL is not set in environment variables")
-        raise SystemExit(1)
-
-    if not subgroup:
-        logging.error("SUBGROUP is not set in environment variables")
-        raise SystemExit(1)
-
-    if not sub_subgroup:
-        logging.error("SUB_SUBGROUP is not set in environment variables")
-        raise SystemExit(1)
-
+    logging.info("Successfully loaded API credentials")
     return telegram_bot_token, website_url, subgroup, sub_subgroup
 
 
@@ -45,9 +46,8 @@ def create_telegram_bot(telegram_bot_token):
         raise SystemExit(1)
 
 
-
-def setup_bot(telegram_bot_token, website_url, subgroup, sub_subgroup):
-    bot = create_telegram_bot(telegram_bot_token)
+def setup_bot(bot, website_url, subgroup, sub_subgroup):
+    logging.info("Setting up Telegram bot handlers")
 
     @bot.message_handler(commands=['start'])
     def start(message):
@@ -58,14 +58,12 @@ def setup_bot(telegram_bot_token, website_url, subgroup, sub_subgroup):
 
     @bot.message_handler(func=lambda message: message.text == "Get Schedule")
     def send_schedule(message):
-        logging.info("Button pressed: Get Schedule")
+        logging.info(f"User {message.from_user.username} (ID: {message.from_user.id}) requested schedule")
 
-        html_doc = fetch_data(website_url)
-        schedule_table = parse_html(html_doc)
+        # Use the cached schedule table if available
         lectures_content = "No schedule found."
-
-        if schedule_table:
-            lecture_info = extract_lecture_info(schedule_table, week, subgroup, sub_subgroup)
+        if cached_schedule_table:
+            lecture_info = extract_lecture_info(cached_schedule_table, week, subgroup, sub_subgroup)
             lectures_content = display_lecture_info(lecture_info)
 
         max_message_length = 4096
@@ -73,9 +71,7 @@ def setup_bot(telegram_bot_token, website_url, subgroup, sub_subgroup):
             part = lectures_content[i:i + max_message_length]
             bot.send_message(message.chat.id, part, parse_mode='Markdown')
 
-        logging.info("Finished answering a message")
-
-    return bot
+        logging.info(f"Completed schedule response to user {message.from_user.username}")
 
 
 def display_lecture_info(lecture_info):
@@ -93,7 +89,9 @@ def display_lecture_info(lecture_info):
         output.append("No lectures found for the current week.")
     return "\n".join(output)
 
+
 def extract_lecture_info(schedule_table, current_week, subgroup, sub_subgroup):
+    logging.info("Extracting lecture information from schedule table")
     lecture_info = defaultdict(list)
     current_day = None
 
@@ -114,7 +112,9 @@ def extract_lecture_info(schedule_table, current_week, subgroup, sub_subgroup):
             if lecture and lecture not in lecture_info[current_day]:
                 lecture_info[current_day].append(lecture)
 
+    logging.info("Completed lecture extraction")
     return lecture_info
+
 
 def process_language_rows(row, current_week, subgroup, sub_subgroup):
     lecture_info = []
@@ -145,6 +145,7 @@ def process_language_rows(row, current_week, subgroup, sub_subgroup):
             break
 
     return lecture_info
+
 
 def process_regular_rows(cells, current_week):
     time = cells[0].text.strip()
@@ -184,7 +185,9 @@ def get_week_match(week_info, current_week):
                 return True
     return False
 
-def fetch_data(website_url): # DONE
+
+def fetch_data(website_url):
+    logging.info("Fetching data from website")
     headers = {
         'Content-Type': 'application/x-www-form-urlencoded'
     }
@@ -199,52 +202,53 @@ def fetch_data(website_url): # DONE
         '__act': '__id.25.main.inpFldsA.GetSchedule__sp.7.results__fp.4.main'
     }
 
-    response = requests.post(website_url, headers=headers, data=data)
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            logging.info(f"Fetch attempt {attempt}")
+            response = requests.post(website_url, headers=headers, data=data, timeout=TIMEOUT_SECONDS)
+            response.raise_for_status()  # Check if the request was successful
+            logging.info("Successfully fetched HTML page")
+            return response.text
+        except requests.exceptions.Timeout:
+            logging.warning(f"Attempt {attempt}: Fetch timed out after {TIMEOUT_SECONDS} seconds")
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Attempt {attempt}: Failed to fetch schedule - {e}")
 
-    logging.info("Fetched html page")
+        if attempt == MAX_RETRIES:
+            logging.error("Max retries reached. Stopping the bot.")
+            raise SystemExit(1)
 
-    return response.text
+        time.sleep(2)  # Wait before retrying
+
 
 def parse_html(html_doc):
+    logging.info("Parsing HTML document")
     soup = BeautifulSoup(html_doc, 'html.parser')
-    return soup.find('table', {'id': 'sched'})
-
-
-def extract_tr_tags_content(html):
-    soup = BeautifulSoup(html, 'html.parser')
-    rows = soup.find_all('tr')
-    if rows:
-        answer = ''.join(str(row) for row in rows)
-        return answer[372:99999999999]  # temporal solution
-    return "No rows found"
-
-
-def is_current_week(week_info, current_week):
-    week_info = week_info.replace('(', '').replace(')', '').replace(' ', '')
-    week_numbers = re.findall(r'\d+-\d+|\d+', week_info)
-
-    for num in week_numbers:
-        if '-' in num:
-            start, end = map(int, num.split('-'))
-            if start <= current_week <= end:
-                return True
-        elif int(num) == current_week:
-            return True
-    return False
-
+    table = soup.find('table', {'id': 'sched'})
+    if table:
+        logging.info("Successfully parsed HTML table")
+    else:
+        logging.warning("Schedule table not found in HTML document")
+    return table
 
 
 def main():
-    logging.basicConfig(level=logging.INFO)
-    logging.info("Starting the bot...")
+    start_time = time.time()  # Log start time
+    logging.info("Bot is starting up")
 
     telegram_bot_token, website_url, subgroup, sub_subgroup = load_api_credentials()
 
-    bot = setup_bot(telegram_bot_token, website_url, subgroup, sub_subgroup)
-    logging.info("Started the bot")
+    global cached_schedule_table
+    html_doc = fetch_data(website_url)
+    cached_schedule_table = parse_html(html_doc)  # Fetch and cache the schedule once at startup
+
+    bot = create_telegram_bot(telegram_bot_token)
+    setup_bot(bot, website_url, subgroup, sub_subgroup)
+
+    end_time = time.time()  # Log end time
+    logging.info(f"Bot setup complete. Initialization time: {end_time - start_time:.2f} seconds")
 
     bot.infinity_polling()
-
 
 if __name__ == '__main__':
     main()
