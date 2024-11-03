@@ -187,25 +187,30 @@ class ScheduleBot:
     def setup_bot(self):
         @self.bot.message_handler(commands=['start'])
         def start(message):
+            self.show_main_menu(message.chat.id)
+
+        def show_main_menu(chat_id):
             markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-            button = types.KeyboardButton("Get Schedule")
-            markup.add(button)
+            button_day = types.KeyboardButton("Get Schedule for Day")
+            button_week = types.KeyboardButton("Get Schedule for Week")
+            markup.add(button_day, button_week)
             self.bot.send_message(
-                message.chat.id, "Welcome! Press the button below to get the schedule.", reply_markup=markup
+                chat_id, "Welcome! Press a button below to get the schedule.", reply_markup=markup
             )
 
-        @self.bot.message_handler(func=lambda message: message.text == "Get Schedule")
+        @self.bot.message_handler(func=lambda message: message.text == "Get Schedule for Day")
         def select_day(message):
             markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
             days = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота"]
             buttons = [types.KeyboardButton(day) for day in days]
             markup.add(*buttons)
+            markup.add(types.KeyboardButton("Back"))
             self.bot.send_message(message.chat.id, "Please select a day to get the schedule.", reply_markup=markup)
 
         @self.bot.message_handler(
             func=lambda message: message.text in ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота"]
         )
-        def send_schedule(message):
+        def send_schedule_for_day(message):
             logging.info(
                 f"User {message.from_user.username} (ID: {message.from_user.id}) requested schedule for {message.text}"
             )
@@ -225,6 +230,31 @@ class ScheduleBot:
                 self.bot.send_message(message.chat.id, part, parse_mode='Markdown')
 
             logging.info(f"Completed schedule response to user {message.from_user.username} (ID: {message.from_user.id})")
+
+        @self.bot.message_handler(func=lambda message: message.text == "Get Schedule for Week")
+        def send_schedule_for_week(message):
+            logging.info(
+                f"User {message.from_user.username} (ID: {message.from_user.id}) requested schedule for the whole week"
+            )
+
+            lectures_content = "No schedule found."
+            if self.cached_schedule_table:
+                lecture_info = extract_lecture_info(
+                    self.cached_schedule_table, self.week, self.subgroup, self.sub_subgroup
+                )
+                if lecture_info:
+                    lectures_content = display_lecture_info(lecture_info)
+
+            max_message_length = 4096
+            for i in range(0, len(lectures_content), max_message_length):
+                part = lectures_content[i:i + max_message_length]
+                self.bot.send_message(message.chat.id, part, parse_mode='Markdown')
+
+            logging.info(f"Completed weekly schedule response to user {message.from_user.username} (ID: {message.from_user.id})")
+
+        @self.bot.message_handler(func=lambda message: message.text == "Back")
+        def back_to_main_menu(message):
+            show_main_menu(message.chat.id)
 
     def run(self):
         start_time = time.time()
