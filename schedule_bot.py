@@ -1,6 +1,8 @@
 import re
 import time
 from datetime import datetime
+from enum import Enum
+
 import telebot
 import logging
 from collections import defaultdict
@@ -17,6 +19,17 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S"
 )
+
+class ScheduleBotAction(str, Enum):
+    GET_SCHEDULE_WEEK = "Получить расписание на неделю"
+    GET_SCHEDULE_DAY = "Получить расписание на конкретный день"
+    CURRENT_WEEK = "Текущая неделя"
+    NEXT_WEEK = "Следующая неделя"
+    PREVIOUS_WEEK = "Предыдущая неделя"
+    BACK = "Назад"
+    WELCOME_MESSAGE = 'Добро пожаловать! Выберите кнопку, чтобы получить расписание'
+    CHOOSE_WEEK_MESSAGE = "Выберите неделю, на которую вы хотите увидеть расписание"
+    CHOOSE_DAY_MESSAGE = "Выберите день, на который вы хотите увидеть расписание"
 
 def fetch_data(website_url, week):
     logging.info("Fetching data from website")
@@ -83,7 +96,7 @@ def get_week_match(week_info, current_week):
 
 
 def process_regular_rows(cells, current_week):
-    time = cells[0].text.strip()
+    time_slot = cells[0].text.strip()
     week_info = cells[1].text.strip()
 
     if not get_week_match(week_info, current_week):
@@ -101,7 +114,7 @@ def process_regular_rows(cells, current_week):
         teacher = ''
 
     return {
-        'Time': time,
+        'Time': time_slot,
         'Subject': subject,
         'Teacher': teacher,
         'Classroom': classroom
@@ -116,7 +129,7 @@ def extract_lecture_info(schedule_table, current_week, subgroup, sub_subgroup):
     for row in schedule_table.find_all('tr'):
         cells = row.find_all('td')
 
-        if len(cells) == 1 and 'colspan' in cells[0].attrs:
+        if len(cells) == 1 and 'cols pan' in cells[0].attrs:
             current_day = cells[0].text.strip()
             continue
 
@@ -136,7 +149,7 @@ def extract_lecture_info(schedule_table, current_week, subgroup, sub_subgroup):
 
 def process_language_rows(row, current_week, subgroup, sub_subgroup):
     lecture_info = []
-    time = row.find_all('td')[0].text.strip()
+    time_slot = row.find_all('td')[0].text.strip()
     week_info = row.find_all('td')[1].text.strip()
 
     if not get_week_match(week_info, current_week):
@@ -152,7 +165,7 @@ def process_language_rows(row, current_week, subgroup, sub_subgroup):
 
             if subgroup in group or sub_subgroup in group:
                 lecture = {
-                    'Time': time,
+                    'Time': time_slot,
                     'Subject': f"{subject} ({group})",
                     'Teacher': teacher,
                     'Classroom': classroom
@@ -193,35 +206,36 @@ class ScheduleBot:
     def setup_bot(self):
         @self.bot.message_handler(commands=['start'])
         def start(message):
-            self.show_main_menu(message.chat.id)
+            show_main_menu(message.chat.id)
 
-        def show_main_menu(chat_id):
+        def show_main_menu(chat_id: int):
             markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-            button_day = types.KeyboardButton("Get Schedule for Day")
-            button_week = types.KeyboardButton("Get Schedule for Week")
+            button_day = types.KeyboardButton(ScheduleBotAction.GET_SCHEDULE_DAY)
+            button_week = types.KeyboardButton(ScheduleBotAction.GET_SCHEDULE_WEEK)
             markup.add(button_day, button_week)
-            self.bot.send_message(
-                chat_id, "Welcome! Press a button below to get the schedule.", reply_markup=markup
-            )
+            self.bot.send_message(chat_id, ScheduleBotAction.WELCOME_MESSAGE, reply_markup=markup)
 
-        @self.bot.message_handler(func=lambda message: message.text == "Get Schedule for Week")
+        @self.bot.message_handler(func=lambda message: message.text == ScheduleBotAction.GET_SCHEDULE_WEEK)
         def select_week_option(message):
             markup = types.ReplyKeyboardMarkup(row_width=3, resize_keyboard=True)
-            button_current_week = types.KeyboardButton("Current Week")
-            button_next_week = types.KeyboardButton("Next Week")
-            button_previous_week = types.KeyboardButton("Previous Week")
-            markup.add(button_current_week, button_next_week, button_previous_week)
-            markup.add(types.KeyboardButton("Back"))
-            self.bot.send_message(message.chat.id, "Please select which week's schedule you want to view.", reply_markup=markup)
+            markup.add(
+                types.KeyboardButton(ScheduleBotAction.CURRENT_WEEK),
+                types.KeyboardButton(ScheduleBotAction.NEXT_WEEK),
+                types.KeyboardButton(ScheduleBotAction.PREVIOUS_WEEK)
+            )
+            markup.add(types.KeyboardButton(ScheduleBotAction.BACK))
+            self.bot.send_message(
+                message.chat.id, ScheduleBotAction.CHOOSE_WEEK_MESSAGE,reply_markup=markup
+            )
 
-        @self.bot.message_handler(func=lambda message: message.text == "Get Schedule for Day")
+        @self.bot.message_handler(func=lambda message: message.text == ScheduleBotAction.GET_SCHEDULE_DAY)
         def select_day(message):
             markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
             days = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота"]
             buttons = [types.KeyboardButton(day) for day in days]
             markup.add(*buttons)
-            markup.add(types.KeyboardButton("Back"))
-            self.bot.send_message(message.chat.id, "Please select a day to get the schedule.", reply_markup=markup)
+            markup.add(types.KeyboardButton(ScheduleBotAction.BACK))
+            self.bot.send_message(message.chat.id, ScheduleBotAction.CHOOSE_DAY_MESSAGE, reply_markup=markup)
 
         @self.bot.message_handler(
             func=lambda message: message.text in ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота"]
@@ -231,7 +245,7 @@ class ScheduleBot:
                 f"User {message.from_user.username} (ID: {message.from_user.id}) requested schedule for {message.text}"
             )
 
-            lectures_content = "No schedule found."
+            lectures_content = "Расписание не найдено"
             if self.cached_schedule_table:
                 lecture_info = extract_lecture_info(
                     self.cached_schedule_table, self.week, self.subgroup, self.sub_subgroup
@@ -248,20 +262,27 @@ class ScheduleBot:
             logging.info(
                 f"Completed schedule response to user {message.from_user.username} (ID: {message.from_user.id})")
 
-        @self.bot.message_handler(func=lambda message: message.text in ["Current Week", "Next Week", "Previous Week"])
+        @self.bot.message_handler(
+            func=lambda message: message.text in [
+                ScheduleBotAction.CURRENT_WEEK,
+                ScheduleBotAction.NEXT_WEEK,
+                ScheduleBotAction.PREVIOUS_WEEK
+            ]
+        )
         def send_schedule_for_week(message):
             logging.info(
                 f"User {message.from_user.username} (ID: {message.from_user.id}) requested schedule for {message.text}"
             )
 
-            if message.text == "Current Week":
+            week = get_current_week()  # Set a default value to avoid reference before assignment
+            if message.text == ScheduleBotAction.CURRENT_WEEK:
                 week = get_current_week()
-            elif message.text == "Next Week":
+            elif message.text == ScheduleBotAction.NEXT_WEEK:
                 week = get_current_week() + 1
-            elif message.text == "Previous Week":
+            elif message.text == ScheduleBotAction.PREVIOUS_WEEK:
                 week = max(1, get_current_week() - 1)  # Week should not be less than 1
 
-            lectures_content = "No schedule found."
+            lectures_content = "Расписание не найдено"
             if self.cached_schedule_table:
                 lecture_info = extract_lecture_info(
                     self.cached_schedule_table, week, self.subgroup, self.sub_subgroup
@@ -274,9 +295,10 @@ class ScheduleBot:
                 part = lectures_content[i:i + max_message_length]
                 self.bot.send_message(message.chat.id, part, parse_mode='Markdown')
 
-            logging.info(f"Completed weekly schedule response to user {message.from_user.username} (ID: {message.from_user.id})")
+            logging.info(
+                f"Completed weekly schedule response to user {message.from_user.username} (ID: {message.from_user.id})")
 
-        @self.bot.message_handler(func=lambda message: message.text == "Back")
+        @self.bot.message_handler(func=lambda message: message.text == ScheduleBotAction.BACK)
         def back_to_main_menu(message):
             show_main_menu(message.chat.id)
 
