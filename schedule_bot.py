@@ -1,7 +1,6 @@
-import os
 import re
 import time
-
+from datetime import datetime
 import telebot
 import logging
 from collections import defaultdict
@@ -62,6 +61,13 @@ def parse_html(html_doc):
         logging.warning("Schedule table not found in HTML document")
     return table
 
+def get_current_week():
+    today = datetime.now().date()
+    # Assuming the school year starts on the 1st of September
+    start_of_school_year = datetime(today.year if today.month >= 9 else today.year - 1, 9, 1).date()
+
+    week_number = ((today - start_of_school_year).days // 7) + 1
+    return week_number
 
 def get_week_match(week_info, current_week):
     week_match = re.findall(r'\d+(?:-\d+)?', week_info)
@@ -182,7 +188,7 @@ class ScheduleBot:
         self.subgroup = subgroup
         self.sub_subgroup = sub_subgroup
         self.cached_schedule_table = None
-        self.week = 10  # TODO: Implement auto week detection
+        self.week = get_current_week()
 
     def setup_bot(self):
         @self.bot.message_handler(commands=['start'])
@@ -197,6 +203,16 @@ class ScheduleBot:
             self.bot.send_message(
                 chat_id, "Welcome! Press a button below to get the schedule.", reply_markup=markup
             )
+
+        @self.bot.message_handler(func=lambda message: message.text == "Get Schedule for Week")
+        def select_week_option(message):
+            markup = types.ReplyKeyboardMarkup(row_width=3, resize_keyboard=True)
+            button_current_week = types.KeyboardButton("Current Week")
+            button_next_week = types.KeyboardButton("Next Week")
+            button_previous_week = types.KeyboardButton("Previous Week")
+            markup.add(button_current_week, button_next_week, button_previous_week)
+            markup.add(types.KeyboardButton("Back"))
+            self.bot.send_message(message.chat.id, "Please select which week's schedule you want to view.", reply_markup=markup)
 
         @self.bot.message_handler(func=lambda message: message.text == "Get Schedule for Day")
         def select_day(message):
@@ -229,18 +245,26 @@ class ScheduleBot:
                 part = lectures_content[i:i + max_message_length]
                 self.bot.send_message(message.chat.id, part, parse_mode='Markdown')
 
-            logging.info(f"Completed schedule response to user {message.from_user.username} (ID: {message.from_user.id})")
+            logging.info(
+                f"Completed schedule response to user {message.from_user.username} (ID: {message.from_user.id})")
 
-        @self.bot.message_handler(func=lambda message: message.text == "Get Schedule for Week")
+        @self.bot.message_handler(func=lambda message: message.text in ["Current Week", "Next Week", "Previous Week"])
         def send_schedule_for_week(message):
             logging.info(
-                f"User {message.from_user.username} (ID: {message.from_user.id}) requested schedule for the whole week"
+                f"User {message.from_user.username} (ID: {message.from_user.id}) requested schedule for {message.text}"
             )
+
+            if message.text == "Current Week":
+                week = get_current_week()
+            elif message.text == "Next Week":
+                week = get_current_week() + 1
+            elif message.text == "Previous Week":
+                week = max(1, get_current_week() - 1)  # Week should not be less than 1
 
             lectures_content = "No schedule found."
             if self.cached_schedule_table:
                 lecture_info = extract_lecture_info(
-                    self.cached_schedule_table, self.week, self.subgroup, self.sub_subgroup
+                    self.cached_schedule_table, week, self.subgroup, self.sub_subgroup
                 )
                 if lecture_info:
                     lectures_content = display_lecture_info(lecture_info)
@@ -261,7 +285,7 @@ class ScheduleBot:
         logging.info("Bot is starting up")
 
         html_doc = fetch_data(self.website_url, self.week)
-        self.cached_schedule_table = parse_html(html_doc)  # Fetch and cache the schedule once at startup
+        self.cached_schedule_table = parse_html(html_doc)
 
         self.setup_bot()
 
